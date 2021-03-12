@@ -933,7 +933,6 @@ See <<settings,Configuring Elasticsearch>> for settings information:
 * <<modules-cluster>>
 * <<modules-discovery-settings>>
 * <<modules-fielddata>>
-* <<modules-http>>
 * <<recovery>>
 * <<indexing-buffer>>
 * <<modules-gateway>>
@@ -944,11 +943,20 @@ See <<settings,Configuring Elasticsearch>> for settings information:
 
 For other information, see:
 
-* <<modules-transport>>
 * <<modules-threadpool>>
 * <<modules-node>>
 * <<modules-plugins>>
 * <<modules-remote-clusters>>
+
+[role="exclude",id="modules-http"]
+=== HTTP
+
+See <<modules-network,Networking>>.
+
+[role="exclude",id="modules-transport"]
+=== Transport
+
+See <<modules-network,Networking>>.
 
 [role="exclude",id="modules-discovery-adding-removing-nodes"]
 === Adding and removing nodes
@@ -1081,6 +1089,11 @@ The `xpack.sql.enabled` setting has been deprecated. SQL access is always enable
 === Index templates [[getting]]
 
 See <<index-templates>>.
+
+[role="exclude",id="indices-template-exists"]
+=== Index template exists (legacy)
+
+See <<indices-template-exists-v1>>.
 
 [role="exclude",id="run-a-search"]
 === Run a search
@@ -1343,3 +1356,39 @@ instead.
 === `fielddata` mapping parameter
 
 See <<fielddata-mapping-param>>.
+
+ifdef::permanently-unreleased-branch[]
+[role="exclude",id="rollup-overview"]
+=== {rollup-cap} overview
+
+// tag::legacy-rollup-redirect[]
+Legacy rollups are deprecated and will be replaced by <<xpack-rollup,new rollup
+functionality>> introduced in Elasticsearch 7.x. For legacy rollup API
+documentation, see <<legacy-rollup-apis>>.
+// end::legacy-rollup-redirect[]
+
+[role="exclude",id="rollup-getting-started"]
+=== Getting started with {rollups}
+
+include::redirects.asciidoc[tag=legacy-rollup-redirect]
+
+[role="exclude",id="rollup-api-quickref"]
+=== {rollup-cap} API quick reference
+
+include::redirects.asciidoc[tag=legacy-rollup-redirect]
+
+[role="exclude",id="rollup-understanding-groups"]
+=== Understanding rollup groups
+
+include::redirects.asciidoc[tag=legacy-rollup-redirect]
+
+[role="exclude",id="rollup-agg-limitations"]
+=== {rollup-cap} aggregation limitations
+
+include::redirects.asciidoc[tag=legacy-rollup-redirect]
+
+[role="exclude",id="rollup-search-limitations"]
+=== {rollup-cap} search limitations
+
+include::redirects.asciidoc[tag=legacy-rollup-redirect]
+endif::[]

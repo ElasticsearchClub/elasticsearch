@@ -1,7 +1,8 @@
 /*
  * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
- * or more contributor license agreements. Licensed under the Elastic License;
- * you may not use this file except in compliance with the Elastic License.
+ * or more contributor license agreements. Licensed under the Elastic License
+ * 2.0; you may not use this file except in compliance with the Elastic License
+ * 2.0.
  */
 
 package org.elasticsearch.xpack.analytics.topmetrics;
@@ -117,7 +118,7 @@ class TopMetricsAggregator extends NumericMetricsAggregator.MultiValue {
 
     @Override
     public LeafBucketCollector getLeafCollector(LeafReaderContext ctx, LeafBucketCollector sub) throws IOException {
-        assert sub == LeafBucketCollector.NO_OP_COLLECTOR : "Expected noop but was " + sub.toString();
+        assert sub.isNoop() : "Expected noop but was " + sub.toString();
 
         BucketedSort.Leaf leafSort = sort.forLeaf(ctx);
 
@@ -248,7 +249,7 @@ class TopMetricsAggregator extends NumericMetricsAggregator.MultiValue {
             return config.getValuesSource().needsScores();
         }
     }
-    
+
     static MetricValues buildMetricValues(
         ValuesSourceRegistry registry,
         BigArrays bigArrays,

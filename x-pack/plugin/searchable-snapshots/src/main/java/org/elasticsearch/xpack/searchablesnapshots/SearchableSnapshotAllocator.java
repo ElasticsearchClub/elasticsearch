@@ -1,7 +1,8 @@
 /*
  * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
- * or more contributor license agreements. Licensed under the Elastic License;
- * you may not use this file except in compliance with the Elastic License.
+ * or more contributor license agreements. Licensed under the Elastic License
+ * 2.0; you may not use this file except in compliance with the Elastic License
+ * 2.0.
  */
 package org.elasticsearch.xpack.searchablesnapshots;
 
@@ -12,6 +13,7 @@ import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.FailedNodeException;
 import org.elasticsearch.client.Client;
 import org.elasticsearch.cluster.ClusterState;
+import org.elasticsearch.cluster.metadata.IndexMetadata;
 import org.elasticsearch.cluster.node.DiscoveryNode;
 import org.elasticsearch.cluster.node.DiscoveryNodes;
 import org.elasticsearch.cluster.routing.RecoverySource;
@@ -26,6 +28,7 @@ import org.elasticsearch.cluster.routing.allocation.FailedShard;
 import org.elasticsearch.cluster.routing.allocation.NodeAllocationResult;
 import org.elasticsearch.cluster.routing.allocation.RoutingAllocation;
 import org.elasticsearch.cluster.routing.allocation.decider.Decision;
+import org.elasticsearch.cluster.routing.allocation.decider.DiskThresholdDecider;
 import org.elasticsearch.common.Nullable;
 import org.elasticsearch.common.Priority;
 import org.elasticsearch.common.collect.Tuple;
@@ -41,6 +44,7 @@ import org.elasticsearch.snapshots.SnapshotId;
 import org.elasticsearch.xpack.searchablesnapshots.action.cache.TransportSearchableSnapshotCacheStoresAction;
 import org.elasticsearch.xpack.searchablesnapshots.action.cache.TransportSearchableSnapshotCacheStoresAction.NodeCacheFilesMetadata;
 import org.elasticsearch.xpack.searchablesnapshots.action.cache.TransportSearchableSnapshotCacheStoresAction.NodesCacheFilesMetadata;
+import org.elasticsearch.xpack.searchablesnapshots.cache.FrozenCacheInfoService;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -51,10 +55,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentMap;
+import java.util.stream.Collectors;
+import java.util.stream.StreamSupport;
 
 import static org.elasticsearch.xpack.searchablesnapshots.SearchableSnapshots.SNAPSHOT_INDEX_ID_SETTING;
 import static org.elasticsearch.xpack.searchablesnapshots.SearchableSnapshots.SNAPSHOT_INDEX_NAME_SETTING;
-import static org.elasticsearch.xpack.searchablesnapshots.SearchableSnapshots.SNAPSHOT_REPOSITORY_SETTING;
+import static org.elasticsearch.xpack.searchablesnapshots.SearchableSnapshotsConstants.SNAPSHOT_PARTIAL_SETTING;
+import static org.elasticsearch.xpack.searchablesnapshots.SearchableSnapshots.SNAPSHOT_REPOSITORY_NAME_SETTING;
 import static org.elasticsearch.xpack.searchablesnapshots.SearchableSnapshots.SNAPSHOT_SNAPSHOT_ID_SETTING;
 import static org.elasticsearch.xpack.searchablesnapshots.SearchableSnapshots.SNAPSHOT_SNAPSHOT_NAME_SETTING;
 
@@ -74,21 +81,44 @@ public class SearchableSnapshotAllocator implements ExistingShardsAllocator {
         }
     };
 
-    private final ConcurrentMap<ShardId, AsyncCacheStatusFetch> asyncFetchStore = ConcurrentCollections.newConcurrentMap();
-
     public static final String ALLOCATOR_NAME = "searchable_snapshot_allocator";
+
+    private final ConcurrentMap<ShardId, AsyncCacheStatusFetch> asyncFetchStore = ConcurrentCollections.newConcurrentMap();
 
     private final Client client;
 
     private final RerouteService rerouteService;
 
-    public SearchableSnapshotAllocator(Client client, RerouteService rerouteService) {
+    private final FrozenCacheInfoService frozenCacheInfoService;
+
+    public SearchableSnapshotAllocator(Client client, RerouteService rerouteService, FrozenCacheInfoService frozenCacheInfoService) {
         this.client = client;
         this.rerouteService = rerouteService;
+        this.frozenCacheInfoService = frozenCacheInfoService;
     }
 
     @Override
-    public void beforeAllocation(RoutingAllocation allocation) {}
+    public void beforeAllocation(RoutingAllocation allocation) {
+        boolean hasPartialIndices = false;
+        for (IndexMetadata indexMetadata : allocation.metadata()) {
+            final Settings indexSettings = indexMetadata.getSettings();
+            if (SearchableSnapshotsConstants.isSearchableSnapshotStore(indexSettings) && SNAPSHOT_PARTIAL_SETTING.get(indexSettings)) {
+                hasPartialIndices = true;
+                break;
+            }
+        }
+
+        if (hasPartialIndices) {
+            frozenCacheInfoService.updateNodes(
+                client,
+                StreamSupport.stream(allocation.routingNodes().spliterator(), false).map(RoutingNode::node).collect(Collectors.toSet()),
+                rerouteService
+            );
+        } else {
+            // clear out any existing entries, which prevents any future retries too
+            frozenCacheInfoService.updateNodes(client, Collections.emptySet(), rerouteService);
+        }
+    }
 
     @Override
     public void afterPrimariesBeforeReplicas(RoutingAllocation allocation) {}
@@ -104,7 +134,6 @@ public class SearchableSnapshotAllocator implements ExistingShardsAllocator {
             && (shardRouting.recoverySource().getType() == RecoverySource.Type.EXISTING_STORE
                 || shardRouting.recoverySource().getType() == RecoverySource.Type.EMPTY_STORE)) {
             // we always force snapshot recovery source to use the snapshot-based recovery process on the node
-
             final Settings indexSettings = allocation.metadata().index(shardRouting.index()).getSettings();
             final IndexId indexId = new IndexId(
                 SNAPSHOT_INDEX_NAME_SETTING.get(indexSettings),
@@ -114,7 +143,7 @@ public class SearchableSnapshotAllocator implements ExistingShardsAllocator {
                 SNAPSHOT_SNAPSHOT_NAME_SETTING.get(indexSettings),
                 SNAPSHOT_SNAPSHOT_ID_SETTING.get(indexSettings)
             );
-            final String repository = SNAPSHOT_REPOSITORY_SETTING.get(indexSettings);
+            final String repository = SNAPSHOT_REPOSITORY_NAME_SETTING.get(indexSettings);
             final Snapshot snapshot = new Snapshot(repository, snapshotId);
 
             shardRouting = unassignedAllocationHandler.updateUnassigned(
@@ -136,7 +165,14 @@ public class SearchableSnapshotAllocator implements ExistingShardsAllocator {
                 unassignedAllocationHandler.initialize(
                     allocateUnassignedDecision.getTargetNode().getId(),
                     allocateUnassignedDecision.getAllocationId(),
-                    allocation.snapshotShardSizeInfo().getShardSize(shardRouting, ShardRouting.UNAVAILABLE_EXPECTED_SHARD_SIZE),
+                    DiskThresholdDecider.getExpectedShardSize(
+                        shardRouting,
+                        ShardRouting.UNAVAILABLE_EXPECTED_SHARD_SIZE,
+                        allocation.clusterInfo(),
+                        allocation.snapshotShardSizeInfo(),
+                        allocation.metadata(),
+                        allocation.routingTable()
+                    ),
                     allocation.changes()
                 );
             } else {
@@ -153,6 +189,11 @@ public class SearchableSnapshotAllocator implements ExistingShardsAllocator {
 
         if (shardRouting.recoverySource().getType() == RecoverySource.Type.SNAPSHOT
             && allocation.snapshotShardSizeInfo().getShardSize(shardRouting) == null) {
+            return AllocateUnassignedDecision.no(UnassignedInfo.AllocationStatus.FETCHING_SHARD_DATA, null);
+        }
+
+        if (SNAPSHOT_PARTIAL_SETTING.get(allocation.metadata().index(shardRouting.index()).getSettings())
+            && frozenCacheInfoService.isFetching()) {
             return AllocateUnassignedDecision.no(UnassignedInfo.AllocationStatus.FETCHING_SHARD_DATA, null);
         }
 
@@ -226,6 +267,7 @@ public class SearchableSnapshotAllocator implements ExistingShardsAllocator {
     @Override
     public void cleanCaches() {
         asyncFetchStore.clear();
+        frozenCacheInfoService.clear();
     }
 
     @Override
@@ -254,6 +296,12 @@ public class SearchableSnapshotAllocator implements ExistingShardsAllocator {
     private AsyncShardFetch.FetchResult<NodeCacheFilesMetadata> fetchData(ShardRouting shard, RoutingAllocation allocation) {
         final ShardId shardId = shard.shardId();
         final Settings indexSettings = allocation.metadata().index(shard.index()).getSettings();
+
+        if (SNAPSHOT_PARTIAL_SETTING.get(indexSettings)) {
+            // cached data for partial indices is not persistent, no need to fetch it
+            return new AsyncShardFetch.FetchResult<>(shardId, Collections.emptyMap(), Collections.emptySet());
+        }
+
         final SnapshotId snapshotId = new SnapshotId(
             SNAPSHOT_SNAPSHOT_NAME_SETTING.get(indexSettings),
             SNAPSHOT_SNAPSHOT_ID_SETTING.get(indexSettings)

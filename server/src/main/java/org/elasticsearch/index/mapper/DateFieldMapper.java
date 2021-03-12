@@ -1,20 +1,9 @@
 /*
- * Licensed to Elasticsearch under one or more contributor
- * license agreements. See the NOTICE file distributed with
- * this work for additional information regarding copyright
- * ownership. Elasticsearch licenses this file to you under
- * the Apache License, Version 2.0 (the "License"); you may
- * not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *    http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
+ * or more contributor license agreements. Licensed under the Elastic License
+ * 2.0 and the Server Side Public License, v 1; you may not use this file except
+ * in compliance with, at your election, the Elastic License 2.0 or the Server
+ * Side Public License, v 1.
  */
 
 package org.elasticsearch.index.mapper;
@@ -31,6 +20,7 @@ import org.elasticsearch.ElasticsearchParseException;
 import org.elasticsearch.Version;
 import org.elasticsearch.common.Nullable;
 import org.elasticsearch.common.geo.ShapeRelation;
+import org.elasticsearch.common.logging.DeprecationCategory;
 import org.elasticsearch.common.logging.DeprecationLogger;
 import org.elasticsearch.common.lucene.BytesRefs;
 import org.elasticsearch.common.time.DateFormatter;
@@ -44,11 +34,12 @@ import org.elasticsearch.index.fielddata.IndexNumericFieldData.NumericType;
 import org.elasticsearch.index.fielddata.plain.SortedNumericIndexFieldData;
 import org.elasticsearch.index.query.DateRangeIncludingNowQuery;
 import org.elasticsearch.index.query.QueryRewriteContext;
-import org.elasticsearch.index.query.QueryShardContext;
+import org.elasticsearch.index.query.SearchExecutionContext;
 import org.elasticsearch.search.DocValueFormat;
 import org.elasticsearch.search.lookup.SearchLookup;
 
 import java.io.IOException;
+import java.text.NumberFormat;
 import java.time.DateTimeException;
 import java.time.Instant;
 import java.time.ZoneId;
@@ -273,7 +264,8 @@ public final class DateFieldMapper extends FieldMapper {
                 if (indexCreatedVersion.onOrAfter(Version.V_8_0_0)) {
                     throw new MapperParsingException("Error parsing [null_value] on field [" + name() + "]: " + e.getMessage(), e);
                 } else {
-                    DEPRECATION_LOGGER.deprecate("date_mapper_null_field", "Error parsing [" + nullValue.getValue()
+                    DEPRECATION_LOGGER.deprecate(DeprecationCategory.MAPPINGS, "date_mapper_null_field",
+                        "Error parsing [" + nullValue.getValue()
                         + "] as date in [null_value] on field [" + name() + "]); [null_value] will be ignored");
                     return null;
                 }
@@ -354,8 +346,25 @@ public final class DateFieldMapper extends FieldMapper {
             return resolution.convert(DateFormatters.from(dateTimeFormatter().parse(value), dateTimeFormatter().locale()).toInstant());
         }
 
+        /**
+         * Format to use to resolve {@link Number}s from the source. Its valid
+         * to send the numbers with up to six digits after the decimal place
+         * and we'll parse them as {@code millis.nanos}. The source
+         * deseralization code isn't particularly careful here and can return
+         * {@link double} instead of the exact string in the {@code _source}.
+         * So we have to *get* that string.
+         * <p>
+         * Nik chose not to use {@link String#format} for this because it feels
+         * a little wasteful. It'd probably be fine but this makes Nik feel a
+         * less bad about the {@code instanceof} and the string allocation.
+         */
+        private static final NumberFormat NUMBER_FORMAT = NumberFormat.getInstance(Locale.ROOT);
+        static {
+            NUMBER_FORMAT.setGroupingUsed(false);
+            NUMBER_FORMAT.setMaximumFractionDigits(6);
+        }
         @Override
-        public ValueFetcher valueFetcher(QueryShardContext context, String format) {
+        public ValueFetcher valueFetcher(SearchExecutionContext context, String format) {
             DateFormatter defaultFormatter = dateTimeFormatter();
             DateFormatter formatter = format != null
                 ? DateFormatter.forPattern(format).withLocale(defaultFormatter.locale())
@@ -364,7 +373,8 @@ public final class DateFieldMapper extends FieldMapper {
             return new SourceValueFetcher(name(), context, nullValue) {
                 @Override
                 public String parseSourceValue(Object value) {
-                    String date = value.toString();
+                    String date = value instanceof Number ? NUMBER_FORMAT.format(value) : value.toString();
+                    // TODO can we emit a warning if we're losing precision here? I'm not sure we can.
                     long timestamp = parse(date);
                     ZonedDateTime dateTime = resolution().toInstant(timestamp).atZone(ZoneOffset.UTC);
                     return formatter.format(dateTime);
@@ -373,13 +383,13 @@ public final class DateFieldMapper extends FieldMapper {
         }
 
         @Override
-        public Query termQuery(Object value, @Nullable QueryShardContext context) {
+        public Query termQuery(Object value, @Nullable SearchExecutionContext context) {
             return rangeQuery(value, value, true, true, ShapeRelation.INTERSECTS, null, null, context);
         }
 
         @Override
         public Query rangeQuery(Object lowerTerm, Object upperTerm, boolean includeLower, boolean includeUpper, ShapeRelation relation,
-                                @Nullable ZoneId timeZone, @Nullable DateMathParser forcedDateParser, QueryShardContext context) {
+                                @Nullable ZoneId timeZone, @Nullable DateMathParser forcedDateParser, SearchExecutionContext context) {
             failIfNotIndexed();
             if (relation == ShapeRelation.DISJOINT) {
                 throw new IllegalArgumentException("Field [" + name() + "] of type [" + typeName() +
@@ -417,7 +427,7 @@ public final class DateFieldMapper extends FieldMapper {
             boolean includeUpper,
             @Nullable ZoneId timeZone,
             DateMathParser parser,
-            QueryShardContext context,
+            SearchExecutionContext context,
             Resolution resolution,
             BiFunction<Long, Long, Query> builder
         ) {
@@ -426,7 +436,7 @@ public final class DateFieldMapper extends FieldMapper {
                 if (lowerTerm == null) {
                     l = Long.MIN_VALUE;
                 } else {
-                    l = parseToLong(lowerTerm, !includeLower, timeZone, parser, nowSupplier, resolution);
+                    l = parseToLong(lowerTerm, includeLower == false, timeZone, parser, nowSupplier, resolution);
                     if (includeLower == false) {
                         ++l;
                     }
@@ -449,7 +459,7 @@ public final class DateFieldMapper extends FieldMapper {
          * @param builder build the query
          * @return the result of the builder, wrapped in {@link DateRangeIncludingNowQuery} if {@code now} was used.
          */
-        public static Query handleNow(QueryShardContext context, Function<LongSupplier, Query> builder) {
+        public static Query handleNow(SearchExecutionContext context, Function<LongSupplier, Query> builder) {
             boolean[] nowUsed = new boolean[1];
             LongSupplier nowSupplier = () -> {
                 nowUsed[0] = true;
@@ -476,7 +486,7 @@ public final class DateFieldMapper extends FieldMapper {
         }
 
         @Override
-        public Query distanceFeatureQuery(Object origin, String pivot, QueryShardContext context) {
+        public Query distanceFeatureQuery(Object origin, String pivot, SearchExecutionContext context) {
             long originLong = parseToLong(origin, true, null, null, context::nowInMillis);
             TimeValue pivotTime = TimeValue.parseTimeValue(pivot, "distance_feature.pivot");
             // As we already apply boost in AbstractQueryBuilder::toQuery, we always passing a boost of 1.0 to distanceFeatureQuery
@@ -512,7 +522,7 @@ public final class DateFieldMapper extends FieldMapper {
 
             long fromInclusive = Long.MIN_VALUE;
             if (from != null) {
-                fromInclusive = parseToLong(from, !includeLower, timeZone, dateParser, context::nowInMillis, resolution);
+                fromInclusive = parseToLong(from, includeLower == false, timeZone, dateParser, context::nowInMillis, resolution);
                 if (includeLower == false) {
                     if (fromInclusive == Long.MAX_VALUE) {
                         return Relation.DISJOINT;

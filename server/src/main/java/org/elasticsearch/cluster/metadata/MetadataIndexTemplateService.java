@@ -1,20 +1,9 @@
 /*
- * Licensed to Elasticsearch under one or more contributor
- * license agreements. See the NOTICE file distributed with
- * this work for additional information regarding copyright
- * ownership. Elasticsearch licenses this file to you under
- * the Apache License, Version 2.0 (the "License"); you may
- * not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *    http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
+ * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
+ * or more contributor license agreements. Licensed under the Elastic License
+ * 2.0 and the Server Side Public License, v 1; you may not use this file except
+ * in compliance with, at your election, the Elastic License 2.0 or the Server
+ * Side Public License, v 1.
  */
 package org.elasticsearch.cluster.metadata;
 
@@ -68,6 +57,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Locale;
@@ -75,6 +65,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.function.Function;
 import java.util.function.Predicate;
@@ -602,7 +593,7 @@ public class MetadataIndexTemplateService {
     static Map<String, List<String>> findConflictingV2Templates(final ClusterState state, final String candidateName,
                                                                 final List<String> indexPatterns, boolean checkPriority, long priority) {
         Automaton v1automaton = Regex.simpleMatchToAutomaton(indexPatterns.toArray(Strings.EMPTY_ARRAY));
-        Map<String, List<String>> overlappingTemplates = new HashMap<>();
+        Map<String, List<String>> overlappingTemplates = new TreeMap<>();
         for (Map.Entry<String, ComposableIndexTemplate> entry : state.metadata().templatesV2().entrySet()) {
             String name = entry.getKey();
             ComposableIndexTemplate template = entry.getValue();
@@ -625,9 +616,9 @@ public class MetadataIndexTemplateService {
      * Remove the given index template from the cluster state. The index template name
      * supports simple regex wildcards for removing multiple index templates at a time.
      */
-    public void removeIndexTemplateV2(final String name, final TimeValue masterTimeout,
+    public void removeIndexTemplateV2(final String[] names, final TimeValue masterTimeout,
                                       final ActionListener<AcknowledgedResponse> listener) {
-        clusterService.submitStateUpdateTask("remove-index-template-v2 [" + name + "]",
+        clusterService.submitStateUpdateTask("remove-index-template-v2 [" + String.join(",", names) + "]",
             new ClusterStateUpdateTask(Priority.URGENT, masterTimeout) {
 
                 @Override
@@ -637,7 +628,7 @@ public class MetadataIndexTemplateService {
 
                 @Override
                 public ClusterState execute(ClusterState currentState) {
-                    return innerRemoveIndexTemplateV2(currentState, name);
+                    return innerRemoveIndexTemplateV2(currentState, names);
                 }
 
                 @Override
@@ -648,20 +639,47 @@ public class MetadataIndexTemplateService {
     }
 
     // Package visible for testing
-    static ClusterState innerRemoveIndexTemplateV2(ClusterState currentState, String name) {
+    static ClusterState innerRemoveIndexTemplateV2(ClusterState currentState, String... names) {
         Set<String> templateNames = new HashSet<>();
-        for (String templateName : currentState.metadata().templatesV2().keySet()) {
-            if (Regex.simpleMatch(name, templateName)) {
-                templateNames.add(templateName);
+
+        if (names.length > 1) {
+            Set<String> missingNames = null;
+            for (String name : names) {
+                if (currentState.metadata().templatesV2().containsKey(name)) {
+                    templateNames.add(name);
+                } else {
+                    // wildcards are not supported, so if a name with a wildcard is specified then
+                    // the else clause gets executed, because template names can't contain a wildcard.
+                    if (missingNames == null) {
+                        missingNames = new LinkedHashSet<>();
+                    }
+                    missingNames.add(name);
+                }
             }
-        }
-        if (templateNames.isEmpty()) {
-            // if its a match all pattern, and no templates are found (we have none), don't
-            // fail with index missing...
-            if (Regex.isMatchAllPattern(name)) {
-                return currentState;
+
+            if (missingNames != null) {
+                throw new IndexTemplateMissingException(String.join(",", missingNames));
             }
-            throw new IndexTemplateMissingException(name);
+        } else {
+            final String name = names[0];
+            for (String templateName : currentState.metadata().templatesV2().keySet()) {
+                if (Regex.simpleMatch(name, templateName)) {
+                    templateNames.add(templateName);
+                }
+            }
+            if (templateNames.isEmpty()) {
+                // if its a match all pattern, and no templates are found (we have none), don't
+                // fail with index missing...
+                boolean isMatchAll = false;
+                if (Regex.isMatchAllPattern(name)) {
+                    isMatchAll = true;
+                }
+                if (isMatchAll) {
+                    return currentState;
+                } else {
+                    throw new IndexTemplateMissingException(name);
+                }
+            }
         }
 
         Optional<Set<String>> dataStreamsUsingTemplates = templateNames.stream()
@@ -1063,6 +1081,13 @@ public class MetadataIndexTemplateService {
         Optional.ofNullable(template.template())
             .map(Template::aliases)
             .ifPresent(aliases::add);
+
+        // A template that creates data streams can't also create aliases.
+        // (otherwise we end up with aliases pointing to backing indices of data streams)
+        if (aliases.size() > 0 && template.getDataStreamTemplate() != null) {
+            throw new IllegalArgumentException("template [" + templateName + "] has alias and data stream definitions");
+        }
+
         // Aliases are applied in order, but subsequent alias configuration from the same name is
         // ignored, so in order for the order to be correct, alias configuration should be in order
         // of precedence (with the index template first)
@@ -1118,7 +1143,9 @@ public class MetadataIndexTemplateService {
                     new AliasValidator(),
                     // the context is only used for validation so it's fine to pass fake values for the
                     // shard id and the current timestamp
-                    xContentRegistry, tempIndexService.newQueryShardContext(0, 0, null, () -> 0L, null, emptyMap()));
+                    xContentRegistry, tempIndexService.newSearchExecutionContext(0, 0, null, () -> 0L, null, emptyMap()),
+                    tempIndexService.dateMathExpressionResolverAt(System.currentTimeMillis()));
+
 
                 // triggers inclusion of _timestamp field and its validation:
                 String indexName = DataStream.BACKING_INDEX_PREFIX + temporaryIndexName;

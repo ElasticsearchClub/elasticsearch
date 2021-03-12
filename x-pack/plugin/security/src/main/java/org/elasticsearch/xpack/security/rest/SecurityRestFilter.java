@@ -1,7 +1,8 @@
 /*
  * Copyright Elasticsearch B.V. and/or licensed to Elasticsearch B.V. under one
- * or more contributor license agreements. Licensed under the Elastic License;
- * you may not use this file except in compliance with the Elastic License.
+ * or more contributor license agreements. Licensed under the Elastic License
+ * 2.0; you may not use this file except in compliance with the Elastic License
+ * 2.0.
  */
 package org.elasticsearch.xpack.security.rest;
 
@@ -23,15 +24,13 @@ import org.elasticsearch.rest.RestChannel;
 import org.elasticsearch.rest.RestHandler;
 import org.elasticsearch.rest.RestRequest;
 import org.elasticsearch.rest.RestRequest.Method;
-import org.elasticsearch.rest.RestStatus;
 import org.elasticsearch.rest.RestRequestFilter;
-
+import org.elasticsearch.rest.RestStatus;
 import org.elasticsearch.xpack.security.authc.AuthenticationService;
 import org.elasticsearch.xpack.security.authc.support.SecondaryAuthenticator;
 import org.elasticsearch.xpack.security.transport.SSLEngineUtils;
 
 import java.io.IOException;
-
 import java.util.List;
 import java.util.Map;
 
@@ -136,16 +135,6 @@ public class SecurityRestFilter implements RestHandler {
     @Override
     public List<Route> routes() {
         return restHandler.routes();
-    }
-
-    @Override
-    public List<DeprecatedRoute> deprecatedRoutes() {
-        return restHandler.deprecatedRoutes();
-    }
-
-    @Override
-    public List<ReplacedRoute> replacedRoutes() {
-        return restHandler.replacedRoutes();
     }
 
     private RestRequest maybeWrapRestRequest(RestRequest restRequest) throws IOException {
