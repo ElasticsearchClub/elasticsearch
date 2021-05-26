@@ -167,17 +167,8 @@ public class NativeUsersStore {
                         .setSize(0)
                         .setTrackTotalHits(true)
                         .request(),
-                    new ActionListener<SearchResponse>() {
-                        @Override
-                        public void onResponse(SearchResponse response) {
-                            listener.onResponse(response.getHits().getTotalHits().value);
-                        }
-
-                        @Override
-                        public void onFailure(Exception e) {
-                            listener.onFailure(e);
-                        }
-                    }, client::search));
+                    listener.<SearchResponse>delegateFailure(
+                            (l, response) -> l.onResponse(response.getHits().getTotalHits().value)), client::search));
         }
     }
 
@@ -187,7 +178,7 @@ public class NativeUsersStore {
     private void getUserAndPassword(final String user, final ActionListener<UserAndPassword> listener) {
         final SecurityIndexManager frozenSecurityIndex = securityIndex.freeze();
         if (frozenSecurityIndex.isAvailable() == false) {
-            if (frozenSecurityIndex.indexExists()) {
+            if (frozenSecurityIndex.indexExists() == false) {
                 logger.trace("could not retrieve user [{}] because security index does not exist", user);
             } else {
                 logger.error("security index is unavailable. short circuiting retrieval of user [{}]", user);
@@ -200,15 +191,24 @@ public class NativeUsersStore {
                             new ActionListener<GetResponse>() {
                                 @Override
                                 public void onResponse(GetResponse response) {
+                                    logger.trace(
+                                        "user [{}] is doc [{}] in index [{}] with primTerm [{}] and seqNo [{}]",
+                                        user,
+                                        response.getId(),
+                                        response.getIndex(),
+                                        response.getPrimaryTerm(),
+                                        response.getSeqNo()
+                                    );
                                     listener.onResponse(transformUser(response.getId(), response.getSource()));
                                 }
 
                                 @Override
                                 public void onFailure(Exception t) {
                                     if (t instanceof IndexNotFoundException) {
-                                        logger.trace(
-                                                (org.apache.logging.log4j.util.Supplier<?>) () -> new ParameterizedMessage(
-                                                        "could not retrieve user [{}] because security index does not exist", user), t);
+                                        logger.trace(new ParameterizedMessage(
+                                                "could not retrieve user [{}] because security index does not exist",
+                                                user),
+                                            t);
                                     } else {
                                         logger.error(new ParameterizedMessage("failed to retrieve user [{}]", user), t);
                                     }
@@ -278,17 +278,7 @@ public class NativeUsersStore {
                             .setSource(Fields.PASSWORD.getPreferredName(), String.valueOf(passwordHash), Fields.ENABLED.getPreferredName(),
                                     true, Fields.TYPE.getPreferredName(), RESERVED_USER_TYPE)
                             .setRefreshPolicy(refresh).request(),
-                    new ActionListener<IndexResponse>() {
-                        @Override
-                        public void onResponse(IndexResponse indexResponse) {
-                            clearRealmCache(username, listener, null);
-                        }
-
-                        @Override
-                        public void onFailure(Exception e) {
-                            listener.onFailure(e);
-                        }
-                    }, client::index);
+                    listener.<IndexResponse>delegateFailure((l, indexResponse) -> clearRealmCache(username, l, null)), client::index);
         });
     }
 
@@ -369,18 +359,8 @@ public class NativeUsersStore {
                                     Fields.TYPE.getPreferredName(), USER_DOC_TYPE)
                             .setRefreshPolicy(putUserRequest.getRefreshPolicy())
                             .request(),
-                    new ActionListener<IndexResponse>() {
-                        @Override
-                        public void onResponse(IndexResponse updateResponse) {
-                            clearRealmCache(putUserRequest.username(), listener,
-                                    updateResponse.getResult() == DocWriteResponse.Result.CREATED);
-                        }
-
-                        @Override
-                        public void onFailure(Exception e) {
-                            listener.onFailure(e);
-                        }
-                    }, client::index);
+                    listener.<IndexResponse>delegateFailure((l, updateResponse) -> clearRealmCache(putUserRequest.username(), l,
+                            updateResponse.getResult() == DocWriteResponse.Result.CREATED)), client::index);
         });
     }
 
@@ -443,21 +423,13 @@ public class NativeUsersStore {
                                     Fields.TYPE.getPreferredName(), RESERVED_USER_TYPE)
                             .setRefreshPolicy(refreshPolicy)
                             .request(),
-                    new ActionListener<UpdateResponse>() {
-                        @Override
-                        public void onResponse(UpdateResponse updateResponse) {
-                            if (clearCache) {
-                                clearRealmCache(username, listener, null);
-                            } else {
-                                listener.onResponse(null);
-                            }
+                    listener.<UpdateResponse>delegateFailure((l, updateResponse) -> {
+                        if (clearCache) {
+                            clearRealmCache(username, l, null);
+                        } else {
+                            l.onResponse(null);
                         }
-
-                        @Override
-                        public void onFailure(Exception e) {
-                            listener.onFailure(e);
-                        }
-                    }, client::update);
+                    }), client::update);
         });
     }
 
@@ -474,18 +446,8 @@ public class NativeUsersStore {
                         .request();
                 request.setRefreshPolicy(deleteUserRequest.getRefreshPolicy());
                 executeAsyncWithOrigin(client.threadPool().getThreadContext(), SECURITY_ORIGIN, request,
-                    new ActionListener<DeleteResponse>() {
-                        @Override
-                        public void onResponse(DeleteResponse deleteResponse) {
-                            clearRealmCache(deleteUserRequest.username(), listener,
-                                deleteResponse.getResult() == DocWriteResponse.Result.DELETED);
-                        }
-
-                        @Override
-                        public void onFailure(Exception e) {
-                            listener.onFailure(e);
-                        }
-                    }, client::delete);
+                    listener.<DeleteResponse>delegateFailure((l, deleteResponse) -> clearRealmCache(deleteUserRequest.username(), l,
+                            deleteResponse.getResult() == DocWriteResponse.Result.DELETED)), client::delete);
             });
         }
     }
@@ -498,12 +460,25 @@ public class NativeUsersStore {
      */
     void verifyPassword(String username, final SecureString password, ActionListener<AuthenticationResult> listener) {
         getUserAndPassword(username, ActionListener.wrap((userAndPassword) -> {
-            if (userAndPassword == null || userAndPassword.passwordHash() == null) {
+            if (userAndPassword == null) {
+                logger.trace(
+                    "user [{}] does not exist in index [{}], cannot authenticate against the native realm",
+                    username,
+                    securityIndex.aliasName()
+                );
                 listener.onResponse(AuthenticationResult.notHandled());
-            } else if (userAndPassword.verifyPassword(password)) {
-                listener.onResponse(AuthenticationResult.success(userAndPassword.user()));
+            } else if (userAndPassword.passwordHash() == null) {
+                logger.debug("user [{}] in index [{}] does not have a password, cannot authenticate", username, securityIndex.aliasName());
+                listener.onResponse(AuthenticationResult.notHandled());
             } else {
-                listener.onResponse(AuthenticationResult.unsuccessful("Password authentication failed for " + username, null));
+                if (userAndPassword.verifyPassword(password)) {
+                    logger.trace(
+                        "successfully authenticated user [{}] (security index [{}])", userAndPassword, securityIndex.aliasName());
+                    listener.onResponse(AuthenticationResult.success(userAndPassword.user()));
+                } else {
+                    logger.trace("password mismatch for user [{}] (security index [{}])", userAndPassword, securityIndex.aliasName());
+                    listener.onResponse(AuthenticationResult.unsuccessful("Password authentication failed for " + username, null));
+                }
             }
         }, listener::onFailure));
     }

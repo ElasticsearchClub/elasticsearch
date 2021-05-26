@@ -318,7 +318,7 @@ public class GeoIpProcessorFactoryTests extends ESTestCase {
         Client client = mock(Client.class);
         GeoIpCache cache = new GeoIpCache(1000);
         DatabaseRegistry databaseRegistry = new DatabaseRegistry(createTempDir(), client, cache, localDatabases, Runnable::run);
-        databaseRegistry.initialize(resourceWatcherService, mock(IngestService.class));
+        databaseRegistry.initialize("nodeId", resourceWatcherService, mock(IngestService.class));
         GeoIpProcessor.Factory factory = new GeoIpProcessor.Factory(databaseRegistry);
         for (DatabaseReaderLazyLoader lazyLoader : localDatabases.getAllDatabases()) {
             assertNull(lazyLoader.databaseReader.get());
@@ -379,7 +379,7 @@ public class GeoIpProcessorFactoryTests extends ESTestCase {
             Map<?, ?> geoData = (Map<?, ?>) ingestDocument.getSourceAndMetadata().get("geoip");
             assertThat(geoData.get("city_name"), equalTo("Tumba"));
 
-            databaseRegistry.updateDatabase("GeoLite2-City.mmdb", "md5", geoipTmpDir.resolve("GeoLite2-City-Test.mmdb"));
+            databaseRegistry.updateDatabase("GeoLite2-City.mmdb", "md5", geoipTmpDir.resolve("GeoLite2-City-Test.mmdb"), 0);
             ingestDocument = RandomDocumentPicks.randomIngestDocument(random(), document);
             processor.execute(ingestDocument);
             geoData = (Map<?, ?>) ingestDocument.getSourceAndMetadata().get("geoip");

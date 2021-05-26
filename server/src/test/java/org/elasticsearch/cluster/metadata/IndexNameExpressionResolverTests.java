@@ -36,7 +36,6 @@ import org.elasticsearch.indices.SystemIndices.Feature;
 import org.elasticsearch.indices.TestIndexNameExpressionResolver;
 import org.elasticsearch.test.ESTestCase;
 
-
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
@@ -49,15 +48,15 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Function;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
-import static org.elasticsearch.cluster.DataStreamTestHelper.createBackingIndex;
-import static org.elasticsearch.cluster.DataStreamTestHelper.createTimestampField;
+import static org.elasticsearch.cluster.metadata.DataStreamTestHelper.createBackingIndex;
+import static org.elasticsearch.cluster.metadata.DataStreamTestHelper.createTimestampField;
 import static org.elasticsearch.cluster.metadata.IndexMetadata.INDEX_HIDDEN_SETTING;
-import static org.elasticsearch.cluster.metadata.IndexNameExpressionResolver.EXTERNAL_SYSTEM_INDEX_ACCESS_CONTROL_HEADER_KEY;
-import static org.elasticsearch.cluster.metadata.IndexNameExpressionResolver.SYSTEM_INDEX_ACCESS_CONTROL_HEADER_KEY;
-import static org.elasticsearch.cluster.metadata.IndexNameExpressionResolver.SystemIndexAccessLevel.NONE;
 import static org.elasticsearch.common.util.set.Sets.newHashSet;
+import static org.elasticsearch.indices.SystemIndices.EXTERNAL_SYSTEM_INDEX_ACCESS_CONTROL_HEADER_KEY;
+import static org.elasticsearch.indices.SystemIndices.SYSTEM_INDEX_ACCESS_CONTROL_HEADER_KEY;
 import static org.hamcrest.Matchers.arrayContaining;
 import static org.hamcrest.Matchers.arrayContainingInAnyOrder;
 import static org.hamcrest.Matchers.arrayWithSize;
@@ -72,6 +71,9 @@ import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.notNullValue;
 
 public class IndexNameExpressionResolverTests extends ESTestCase {
+
+    private static final Predicate<String> NONE = name -> false;
+
     private IndexNameExpressionResolver indexNameExpressionResolver;
     private ThreadContext threadContext;
     private long epochMillis;
@@ -1922,13 +1924,15 @@ public class IndexNameExpressionResolverTests extends ESTestCase {
             Map.of(
                 "ml",
                 new Feature(
+                    "ml",
                     "ml indices",
                     List.of(new SystemIndexDescriptor(".ml-meta", "ml meta"), new SystemIndexDescriptor(".ml-stuff", "other ml"))
                 ),
                 "watcher",
-                new Feature("watcher indices", List.of(new SystemIndexDescriptor(".watches", "watches index"))),
+                new Feature("watcher", "watcher indices", List.of(new SystemIndexDescriptor(".watches", "watches index"))),
                 "stack-component",
-                new Feature("stack component",
+                new Feature("stack-component",
+                    "stack component",
                     List.of(
                         new SystemIndexDescriptor(
                             ".external-sys-idx",
@@ -2316,11 +2320,11 @@ public class IndexNameExpressionResolverTests extends ESTestCase {
             .put(indexBuilder("some-other-index").state(State.OPEN));
         SystemIndices systemIndices = new SystemIndices(
             Map.of("ml",
-                new Feature("ml indices",
+                new Feature("ml", "ml indices",
                     List.of(new SystemIndexDescriptor(".ml-meta", "ml meta"), new SystemIndexDescriptor(".ml-stuff", "other ml"))
                 ),
                 "watcher",
-                new Feature("watcher indices", List.of(new SystemIndexDescriptor(".watches", "watches index")))
+                new Feature("watcher", "watcher indices", List.of(new SystemIndexDescriptor(".watches", "watches index")))
             )
         );
         indexNameExpressionResolver = new IndexNameExpressionResolver(threadContext, systemIndices);

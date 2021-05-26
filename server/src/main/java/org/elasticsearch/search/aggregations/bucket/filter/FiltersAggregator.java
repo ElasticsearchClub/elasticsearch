@@ -9,7 +9,6 @@
 package org.elasticsearch.search.aggregations.bucket.filter;
 
 import org.apache.lucene.index.LeafReaderContext;
-import org.apache.lucene.search.CollectionTerminatedException;
 import org.apache.lucene.search.LeafCollector;
 import org.apache.lucene.search.Scorable;
 import org.apache.lucene.util.Bits;
@@ -252,7 +251,7 @@ public abstract class FiltersAggregator extends BucketsAggregator {
     @Override
     public InternalAggregation buildEmptyAggregation() {
         InternalAggregations subAggs = buildEmptySubAggregations();
-        List<InternalFilters.InternalBucket> buckets = new ArrayList<>(filters.size() + otherBucketKey == null ? 0 : 1);
+        List<InternalFilters.InternalBucket> buckets = new ArrayList<>(filters.size() + (otherBucketKey == null ? 0 : 1));
         for (QueryToFilterAdapter<?> filter : filters) {
             InternalFilters.InternalBucket bucket = new InternalFilters.InternalBucket(filter.key().toString(), 0, subAggs, keyed);
             buckets.add(bucket);
@@ -390,12 +389,13 @@ public abstract class FiltersAggregator extends BucketsAggregator {
                  * Without sub.isNoop we always end up in the `collectXXX` modes even if
                  * the sub-aggregators opt out of traditional collection.
                  */
+                segmentsCounted++;
                 collectCount(ctx, live);
             } else {
+                segmentsCollected++;
                 collectSubs(ctx, live, sub);
             }
-            // Throwing this exception is how we communicate to the collection mechanism that we don't need the segment.
-            throw new CollectionTerminatedException();
+            return LeafBucketCollector.NO_OP_COLLECTOR;
         }
 
         /**

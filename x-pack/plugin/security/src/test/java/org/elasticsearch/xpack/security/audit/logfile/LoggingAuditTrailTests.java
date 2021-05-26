@@ -84,6 +84,7 @@ import org.elasticsearch.xpack.core.security.authz.RoleDescriptor;
 import org.elasticsearch.xpack.core.security.authz.privilege.ApplicationPrivilegeDescriptor;
 import org.elasticsearch.xpack.core.security.authz.privilege.ConfigurableClusterPrivilege;
 import org.elasticsearch.xpack.core.security.authz.privilege.ConfigurableClusterPrivileges;
+import org.elasticsearch.xpack.core.security.support.ValidationTests;
 import org.elasticsearch.xpack.core.security.user.AnonymousUser;
 import org.elasticsearch.xpack.core.security.user.AsyncSearchUser;
 import org.elasticsearch.xpack.core.security.user.SystemUser;
@@ -95,6 +96,8 @@ import org.elasticsearch.xpack.security.audit.AuditLevel;
 import org.elasticsearch.xpack.security.audit.AuditTrail;
 import org.elasticsearch.xpack.security.audit.AuditUtil;
 import org.elasticsearch.xpack.security.authc.ApiKeyService;
+import org.elasticsearch.xpack.security.authc.service.ServiceAccount.ServiceAccountId;
+import org.elasticsearch.xpack.security.authc.service.ServiceAccountToken;
 import org.elasticsearch.xpack.security.rest.RemoteHostHeader;
 import org.elasticsearch.xpack.security.support.CacheInvalidatorRegistry;
 import org.elasticsearch.xpack.security.support.SecurityIndexManager;
@@ -132,6 +135,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
+import static org.elasticsearch.xpack.core.security.authc.service.ServiceAccountSettings.TOKEN_NAME_FIELD;
 import static org.elasticsearch.xpack.security.audit.logfile.LoggingAuditTrail.PRINCIPAL_ROLES_FIELD_NAME;
 import static org.elasticsearch.xpack.security.authc.ApiKeyServiceTests.Utils.createApiKeyAuthentication;
 import static org.hamcrest.Matchers.containsInAnyOrder;
@@ -1146,19 +1150,22 @@ public class LoggingAuditTrailTests extends ESTestCase {
     }
 
     public void testAuthenticationFailed() throws Exception {
-        final AuthenticationToken mockToken = new MockToken();
+        final AuthenticationToken authToken = createAuthenticationToken();
         final TransportRequest request = randomBoolean() ? new MockRequest(threadContext) : new MockIndicesRequest(threadContext);
 
         final String requestId = randomRequestId();
-        auditTrail.authenticationFailed(requestId, mockToken, "_action", request);
+        auditTrail.authenticationFailed(requestId, authToken, "_action", request);
         final MapBuilder<String, String[]> checkedArrayFields = new MapBuilder<>();
         final MapBuilder<String, String> checkedFields = new MapBuilder<>(commonFields);
         checkedFields.put(LoggingAuditTrail.EVENT_TYPE_FIELD_NAME, LoggingAuditTrail.TRANSPORT_ORIGIN_FIELD_VALUE)
                      .put(LoggingAuditTrail.EVENT_ACTION_FIELD_NAME, "authentication_failed")
                      .put(LoggingAuditTrail.ACTION_FIELD_NAME, "_action")
-                     .put(LoggingAuditTrail.PRINCIPAL_FIELD_NAME, mockToken.principal())
+                     .put(LoggingAuditTrail.PRINCIPAL_FIELD_NAME, authToken.principal())
                      .put(LoggingAuditTrail.REQUEST_NAME_FIELD_NAME, request.getClass().getSimpleName())
                      .put(LoggingAuditTrail.REQUEST_ID_FIELD_NAME, requestId);
+        if (authToken instanceof ServiceAccountToken) {
+            checkedFields.put(LoggingAuditTrail.SERVICE_TOKEN_NAME_FIELD_NAME, ((ServiceAccountToken) authToken).getTokenName());
+        }
         restOrTransportOrigin(request, threadContext, checkedFields);
         indicesRequest(request, checkedFields, checkedArrayFields);
         opaqueId(threadContext, checkedFields);
@@ -1171,7 +1178,7 @@ public class LoggingAuditTrailTests extends ESTestCase {
                 .put(settings)
                 .put("xpack.security.audit.logfile.events.exclude", "authentication_failed")
                 .build());
-        auditTrail.authenticationFailed(requestId, new MockToken(), "_action", request);
+        auditTrail.authenticationFailed(requestId, createAuthenticationToken(), "_action", request);
         assertEmptyLog(logger);
     }
 
@@ -1213,19 +1220,22 @@ public class LoggingAuditTrailTests extends ESTestCase {
         final Tuple<RestContent, RestRequest> tuple = prepareRestContent("_uri", address, params);
         final String expectedMessage = tuple.v1().expectedMessage();
         final RestRequest request = tuple.v2();
-        final AuthenticationToken mockToken = new MockToken();
+        final AuthenticationToken authToken = createAuthenticationToken();
 
         final String requestId = randomRequestId();
-        auditTrail.authenticationFailed(requestId, mockToken, request);
+        auditTrail.authenticationFailed(requestId, authToken, request);
         final MapBuilder<String, String> checkedFields = new MapBuilder<>(commonFields);
         checkedFields.put(LoggingAuditTrail.EVENT_TYPE_FIELD_NAME, LoggingAuditTrail.REST_ORIGIN_FIELD_VALUE)
                      .put(LoggingAuditTrail.EVENT_ACTION_FIELD_NAME, "authentication_failed")
-                     .put(LoggingAuditTrail.PRINCIPAL_FIELD_NAME, mockToken.principal())
+                     .put(LoggingAuditTrail.PRINCIPAL_FIELD_NAME, authToken.principal())
                      .put(LoggingAuditTrail.ORIGIN_TYPE_FIELD_NAME, LoggingAuditTrail.REST_ORIGIN_FIELD_VALUE)
                      .put(LoggingAuditTrail.ORIGIN_ADDRESS_FIELD_NAME, NetworkAddress.format(address))
                      .put(LoggingAuditTrail.REQUEST_METHOD_FIELD_NAME, request.method().toString())
                      .put(LoggingAuditTrail.REQUEST_ID_FIELD_NAME, requestId)
                      .put(LoggingAuditTrail.URL_PATH_FIELD_NAME, "_uri");
+        if (authToken instanceof ServiceAccountToken) {
+            checkedFields.put(LoggingAuditTrail.SERVICE_TOKEN_NAME_FIELD_NAME, ((ServiceAccountToken) authToken).getTokenName());
+        }
         if (includeRequestBody && Strings.hasLength(expectedMessage)) {
             checkedFields.put(LoggingAuditTrail.REQUEST_BODY_FIELD_NAME, expectedMessage);
         }
@@ -1242,7 +1252,7 @@ public class LoggingAuditTrailTests extends ESTestCase {
                 .put(settings)
                 .put("xpack.security.audit.logfile.events.exclude", "authentication_failed")
                 .build());
-        auditTrail.authenticationFailed(requestId, new MockToken(), request);
+        auditTrail.authenticationFailed(requestId, createAuthenticationToken(), request);
         assertEmptyLog(logger);
     }
 
@@ -1288,11 +1298,11 @@ public class LoggingAuditTrailTests extends ESTestCase {
     }
 
     public void testAuthenticationFailedRealm() throws Exception {
-        final AuthenticationToken mockToken = new MockToken();
+        final AuthenticationToken authToken = mockToken();
         final TransportRequest request = randomBoolean() ? new MockRequest(threadContext) : new MockIndicesRequest(threadContext);
         final String realm = randomAlphaOfLengthBetween(1, 6);
         final String requestId = randomRequestId();
-        auditTrail.authenticationFailed(requestId, realm, mockToken, "_action", request);
+        auditTrail.authenticationFailed(requestId, realm, authToken, "_action", request);
         assertEmptyLog(logger);
 
         // test enabled
@@ -1300,13 +1310,13 @@ public class LoggingAuditTrailTests extends ESTestCase {
                        .put(settings)
                        .put("xpack.security.audit.logfile.events.include", "realm_authentication_failed")
                        .build());
-        auditTrail.authenticationFailed(requestId, realm, mockToken, "_action", request);
+        auditTrail.authenticationFailed(requestId, realm, authToken, "_action", request);
         final MapBuilder<String, String> checkedFields = new MapBuilder<>(commonFields);
         final MapBuilder<String, String[]> checkedArrayFields = new MapBuilder<>();
         checkedFields.put(LoggingAuditTrail.EVENT_TYPE_FIELD_NAME, LoggingAuditTrail.TRANSPORT_ORIGIN_FIELD_VALUE)
                      .put(LoggingAuditTrail.EVENT_ACTION_FIELD_NAME, "realm_authentication_failed")
                      .put(LoggingAuditTrail.REALM_FIELD_NAME, realm)
-                     .put(LoggingAuditTrail.PRINCIPAL_FIELD_NAME, mockToken.principal())
+                     .put(LoggingAuditTrail.PRINCIPAL_FIELD_NAME, authToken.principal())
                      .put(LoggingAuditTrail.ACTION_FIELD_NAME, "_action")
                      .put(LoggingAuditTrail.REQUEST_NAME_FIELD_NAME, request.getClass().getSimpleName())
                      .put(LoggingAuditTrail.REQUEST_ID_FIELD_NAME, requestId);
@@ -1327,10 +1337,10 @@ public class LoggingAuditTrailTests extends ESTestCase {
         final Tuple<RestContent, RestRequest> tuple = prepareRestContent("_uri", address, params);
         final String expectedMessage = tuple.v1().expectedMessage();
         final RestRequest request = tuple.v2();
-        final AuthenticationToken mockToken = new MockToken();
+        final AuthenticationToken authToken = mockToken();
         final String realm = randomAlphaOfLengthBetween(1, 6);
         final String requestId = randomRequestId();
-        auditTrail.authenticationFailed(requestId, realm, mockToken, request);
+        auditTrail.authenticationFailed(requestId, realm, authToken, request);
         assertEmptyLog(logger);
 
         // test enabled
@@ -1338,14 +1348,14 @@ public class LoggingAuditTrailTests extends ESTestCase {
                 .put(settings)
                 .put("xpack.security.audit.logfile.events.include", "realm_authentication_failed")
                 .build());
-        auditTrail.authenticationFailed(requestId, realm, mockToken, request);
+        auditTrail.authenticationFailed(requestId, realm, authToken, request);
         final MapBuilder<String, String> checkedFields = new MapBuilder<>(commonFields);
         checkedFields.put(LoggingAuditTrail.EVENT_TYPE_FIELD_NAME, LoggingAuditTrail.REST_ORIGIN_FIELD_VALUE)
                      .put(LoggingAuditTrail.EVENT_ACTION_FIELD_NAME, "realm_authentication_failed")
                      .put(LoggingAuditTrail.REALM_FIELD_NAME, realm)
                      .put(LoggingAuditTrail.ORIGIN_TYPE_FIELD_NAME, LoggingAuditTrail.REST_ORIGIN_FIELD_VALUE)
                      .put(LoggingAuditTrail.ORIGIN_ADDRESS_FIELD_NAME, NetworkAddress.format(address))
-                     .put(LoggingAuditTrail.PRINCIPAL_FIELD_NAME, mockToken.principal())
+                     .put(LoggingAuditTrail.PRINCIPAL_FIELD_NAME, authToken.principal())
                      .put(LoggingAuditTrail.REQUEST_METHOD_FIELD_NAME, request.method().toString())
                      .put(LoggingAuditTrail.REQUEST_ID_FIELD_NAME, requestId)
                      .put(LoggingAuditTrail.URL_PATH_FIELD_NAME, "_uri");
@@ -1375,6 +1385,7 @@ public class LoggingAuditTrailTests extends ESTestCase {
                 .put(LoggingAuditTrail.ACTION_FIELD_NAME, "_action")
                 .put(LoggingAuditTrail.REQUEST_NAME_FIELD_NAME, request.getClass().getSimpleName())
                 .put(LoggingAuditTrail.REQUEST_ID_FIELD_NAME, requestId);
+
         checkedArrayFields.put(PRINCIPAL_ROLES_FIELD_NAME, (String[]) authorizationInfo.asMap().get(PRINCIPAL_ROLES_FIELD_NAME));
         authentication(authentication, checkedFields);
         restOrTransportOrigin(request, threadContext, checkedFields);
@@ -1624,6 +1635,9 @@ public class LoggingAuditTrailTests extends ESTestCase {
                 .put(LoggingAuditTrail.ACTION_FIELD_NAME, "_action/bar")
                 .put(LoggingAuditTrail.REQUEST_NAME_FIELD_NAME, request.getClass().getSimpleName())
                 .put(LoggingAuditTrail.REQUEST_ID_FIELD_NAME, requestId);
+        if (authentication.isServiceAccount()) {
+            checkedFields.put(LoggingAuditTrail.SERVICE_TOKEN_NAME_FIELD_NAME, (String) authentication.getMetadata().get(TOKEN_NAME_FIELD));
+        }
         checkedArrayFields.put(PRINCIPAL_ROLES_FIELD_NAME, (String[]) authorizationInfo.asMap().get(PRINCIPAL_ROLES_FIELD_NAME));
         authentication(authentication, checkedFields);
         restOrTransportOrigin(request, threadContext, checkedFields);
@@ -2037,7 +2051,6 @@ public class LoggingAuditTrailTests extends ESTestCase {
                 .put("xpack.security.audit.logfile.events.include", "_all")
                 .build();
         auditTrail = new LoggingAuditTrail(settings, clusterService, logger, threadContext);
-        final User user = new User("_username", new String[] { "r1" });
         final AuthorizationInfo authorizationInfo =
             () -> Collections.singletonMap(PRINCIPAL_ROLES_FIELD_NAME, new String[] { randomAlphaOfLengthBetween(1, 6) });
         final String realm = randomAlphaOfLengthBetween(1, 6);
@@ -2051,13 +2064,13 @@ public class LoggingAuditTrailTests extends ESTestCase {
             auditTrail.anonymousAccessDenied("_req_id", "_action", request);
             assertThat(output.size(), is(logEntriesCount++));
             assertThat(output.get(logEntriesCount - 2), not(containsString("indices=")));
-            auditTrail.authenticationFailed("_req_id", new MockToken(), "_action", request);
+            auditTrail.authenticationFailed("_req_id", createAuthenticationToken(), "_action", request);
             assertThat(output.size(), is(logEntriesCount++));
             assertThat(output.get(logEntriesCount - 2), not(containsString("indices=")));
             auditTrail.authenticationFailed("_req_id", "_action", request);
             assertThat(output.size(), is(logEntriesCount++));
             assertThat(output.get(logEntriesCount - 2), not(containsString("indices=")));
-            auditTrail.authenticationFailed("_req_id", realm, new MockToken(), "_action", request);
+            auditTrail.authenticationFailed("_req_id", realm, mockToken(), "_action", request);
             assertThat(output.size(), is(logEntriesCount++));
             assertThat(output.get(logEntriesCount - 2), not(containsString("indices=")));
             auditTrail.accessGranted("_req_id", randomBoolean() ? createAuthentication() : createApiKeyAuthentication(apiKeyService,
@@ -2205,17 +2218,63 @@ public class LoggingAuditTrailTests extends ESTestCase {
         final RealmRef lookedUpBy;
         final RealmRef authBy;
         final User user;
-        if (randomBoolean()) {
-            user = new User(randomAlphaOfLength(4), new String[] { "r1" }, new User("authenticated_username", new String[] { "r2" }));
-            lookedUpBy = new RealmRef(randomAlphaOfLength(4), "lookup", "by");
-            authBy = new RealmRef("authRealm", "auth", "foo");
-        } else {
-            user = new User(randomAlphaOfLength(4), new String[] { "r1" });
-            lookedUpBy = null;
-            authBy = new RealmRef(randomAlphaOfLength(4), "auth", "by");
+        final AuthenticationType authenticationType;
+        final Map<String, Object> authMetadata;
+        switch (randomIntBetween(0, 2)) {
+            case 0:
+                user = new User(randomAlphaOfLength(4), new String[] { "r1" }, new User("authenticated_username", "r2"));
+                lookedUpBy = new RealmRef(randomAlphaOfLength(4), "lookup", "by");
+                authBy = new RealmRef("authRealm", "auth", "foo");
+                authenticationType= randomFrom(AuthenticationType.REALM, AuthenticationType.TOKEN,
+                    AuthenticationType.INTERNAL, AuthenticationType.ANONYMOUS);
+                authMetadata = Map.of();
+                break;
+            case 1:
+                user = new User(randomAlphaOfLength(4), "r1");
+                lookedUpBy = null;
+                authBy = new RealmRef(randomAlphaOfLength(4), "auth", "by");
+                authenticationType= randomFrom(AuthenticationType.REALM, AuthenticationType.TOKEN,
+                    AuthenticationType.INTERNAL, AuthenticationType.ANONYMOUS);
+                authMetadata = Map.of();
+                break;
+            default:  // service account
+                final String principal = randomAlphaOfLengthBetween(3, 8) + "/" + randomAlphaOfLengthBetween(3, 8);
+                user = new User(principal, Strings.EMPTY_ARRAY, "Service account - " + principal, null,
+                    Map.of("_elastic_service_account", true), true);
+                lookedUpBy = null;
+                authBy = new RealmRef("_service_account", "_service_account", randomAlphaOfLengthBetween(3, 8));
+                authenticationType = AuthenticationType.TOKEN;
+                authMetadata = Map.of("_token_name", ValidationTests.randomTokenName());
         }
-        return new Authentication(user, authBy, lookedUpBy, Version.CURRENT, randomFrom(AuthenticationType.REALM,
-                AuthenticationType.TOKEN, AuthenticationType.INTERNAL, AuthenticationType.ANONYMOUS), Collections.emptyMap());
+        return new Authentication(user, authBy, lookedUpBy, Version.CURRENT, authenticationType, authMetadata);
+    }
+
+    private AuthenticationToken createAuthenticationToken() {
+        switch (randomIntBetween(0, 2)) {
+            case 0:
+                final ServiceAccountId accountId = new ServiceAccountId(randomAlphaOfLengthBetween(3, 8), randomAlphaOfLengthBetween(3, 8));
+                return ServiceAccountToken.newToken(accountId, ValidationTests.randomTokenName());
+            default:
+                return mockToken();
+        }
+    }
+
+    private AuthenticationToken mockToken() {
+        return new AuthenticationToken() {
+            @Override
+            public String principal() {
+                return "_principal";
+            }
+
+            @Override
+            public Object credentials() {
+                fail("it's not allowed to print the credentials of the auth token");
+                return null;
+            }
+
+            @Override
+            public void clearCredentials() { }
+        };
     }
 
     private ClusterSettings mockClusterSettings() {
@@ -2260,24 +2319,6 @@ public class LoggingAuditTrailTests extends ESTestCase {
         @Override
         public String toString() {
             return "mock-message";
-        }
-    }
-
-    private static class MockToken implements AuthenticationToken {
-        @Override
-        public String principal() {
-            return "_principal";
-        }
-
-        @Override
-        public Object credentials() {
-            fail("it's not allowed to print the credentials of the auth token");
-            return null;
-        }
-
-        @Override
-        public void clearCredentials() {
-
         }
     }
 
@@ -2327,6 +2368,9 @@ public class LoggingAuditTrailTests extends ESTestCase {
             } else {
                 checkedFields.put(LoggingAuditTrail.PRINCIPAL_REALM_FIELD_NAME, authentication.getAuthenticatedBy().getName());
             }
+        }
+        if (authentication.isServiceAccount()) {
+            checkedFields.put(LoggingAuditTrail.SERVICE_TOKEN_NAME_FIELD_NAME, (String) authentication.getMetadata().get(TOKEN_NAME_FIELD));
         }
     }
 

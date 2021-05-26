@@ -8,7 +8,6 @@ package org.elasticsearch.xpack.core.ilm;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.elasticsearch.Version;
 import org.elasticsearch.client.Client;
 import org.elasticsearch.cluster.health.ClusterHealthStatus;
 import org.elasticsearch.cluster.metadata.IndexAbstraction;
@@ -80,11 +79,7 @@ public class SearchableSnapshotAction implements LifecycleAction {
 
     public SearchableSnapshotAction(StreamInput in) throws IOException {
         this.snapshotRepository = in.readString();
-        if (in.getVersion().onOrAfter(Version.V_7_10_0)) {
-            this.forceMergeIndex = in.readBoolean();
-        } else {
-            this.forceMergeIndex = true;
-        }
+        this.forceMergeIndex = in.readBoolean();
     }
 
     boolean isForceMergeIndex() {
@@ -220,7 +215,7 @@ public class SearchableSnapshotAction implements LifecycleAction {
         WaitForIndexColorStep waitForGreenIndexHealthStep = new WaitForIndexColorStep(waitForGreenRestoredIndexKey,
             copyMetadataKey, ClusterHealthStatus.GREEN, getRestoredIndexPrefix(waitForGreenRestoredIndexKey));
         CopyExecutionStateStep copyMetadataStep = new CopyExecutionStateStep(copyMetadataKey, copyLifecyclePolicySettingKey,
-            getRestoredIndexPrefix(copyMetadataKey), nextStepKey);
+            (index, executionState) -> getRestoredIndexPrefix(copyMetadataKey) + index, nextStepKey);
         CopySettingsStep copySettingsStep = new CopySettingsStep(copyLifecyclePolicySettingKey, dataStreamCheckBranchingKey,
             getRestoredIndexPrefix(copyLifecyclePolicySettingKey), LifecycleSettings.LIFECYCLE_NAME);
         BranchingStep isDataStreamBranchingStep = new BranchingStep(dataStreamCheckBranchingKey, swapAliasesKey, replaceDataStreamIndexKey,
@@ -230,7 +225,7 @@ public class SearchableSnapshotAction implements LifecycleAction {
                 return indexAbstraction.getParentDataStream() != null;
             });
         ReplaceDataStreamBackingIndexStep replaceDataStreamBackingIndex = new ReplaceDataStreamBackingIndexStep(replaceDataStreamIndexKey,
-            deleteIndexKey, getRestoredIndexPrefix(replaceDataStreamIndexKey));
+            deleteIndexKey, (index, executionState) -> getRestoredIndexPrefix(replaceDataStreamIndexKey) + index);
         DeleteStep deleteSourceIndexStep = new DeleteStep(deleteIndexKey, null, client);
         // sending this step to null as the restored index (which will after this step essentially be the source index) was sent to the next
         // key after we restored the lifecycle execution state
@@ -293,9 +288,7 @@ public class SearchableSnapshotAction implements LifecycleAction {
     @Override
     public void writeTo(StreamOutput out) throws IOException {
         out.writeString(snapshotRepository);
-        if (out.getVersion().onOrAfter(Version.V_7_10_0)) {
-            out.writeBoolean(forceMergeIndex);
-        }
+        out.writeBoolean(forceMergeIndex);
     }
 
     @Override
