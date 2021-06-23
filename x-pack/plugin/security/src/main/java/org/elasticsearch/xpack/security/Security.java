@@ -45,6 +45,7 @@ import org.elasticsearch.env.Environment;
 import org.elasticsearch.env.NodeEnvironment;
 import org.elasticsearch.http.HttpServerTransport;
 import org.elasticsearch.index.IndexModule;
+import org.elasticsearch.indices.ExecutorNames;
 import org.elasticsearch.indices.SystemIndexDescriptor;
 import org.elasticsearch.indices.breaker.CircuitBreakerService;
 import org.elasticsearch.ingest.Processor;
@@ -487,12 +488,12 @@ public class Security extends Plugin implements SystemIndexPlugin, IngestPlugin,
         components.add(realms);
         components.add(reservedRealm);
 
-        securityIndex.get().addIndexStateListener(nativeRoleMappingStore::onSecurityIndexStateChange);
+        securityIndex.get().addStateListener(nativeRoleMappingStore::onSecurityIndexStateChange);
 
         final CacheInvalidatorRegistry cacheInvalidatorRegistry = new CacheInvalidatorRegistry();
         cacheInvalidatorRegistry.registerAlias("service", Set.of("file_service_account_token", "index_service_account_token"));
         components.add(cacheInvalidatorRegistry);
-        securityIndex.get().addIndexStateListener(cacheInvalidatorRegistry::onSecurityIndexStateChange);
+        securityIndex.get().addStateListener(cacheInvalidatorRegistry::onSecurityIndexStateChange);
 
         final NativePrivilegeStore privilegeStore =
             new NativePrivilegeStore(settings, client, securityIndex.get(), cacheInvalidatorRegistry);
@@ -530,7 +531,7 @@ public class Security extends Plugin implements SystemIndexPlugin, IngestPlugin,
         final CompositeRolesStore allRolesStore = new CompositeRolesStore(settings, fileRolesStore, nativeRolesStore, reservedRolesStore,
             privilegeStore, rolesProviders, threadPool.getThreadContext(), getLicenseState(), fieldPermissionsCache, apiKeyService,
             serviceAccountService, dlsBitsetCache.get(), new DeprecationRoleDescriptorConsumer(clusterService, threadPool));
-        securityIndex.get().addIndexStateListener(allRolesStore::onSecurityIndexStateChange);
+        securityIndex.get().addStateListener(allRolesStore::onSecurityIndexStateChange);
 
         // to keep things simple, just invalidate all cached entries on license change. this happens so rarely that the impact should be
         // minimal
@@ -550,7 +551,7 @@ public class Security extends Plugin implements SystemIndexPlugin, IngestPlugin,
         authcService.set(new AuthenticationService(settings, realms, auditTrailService, failureHandler, threadPool,
                 anonymousUser, tokenService, apiKeyService, serviceAccountService, operatorPrivilegesService));
         components.add(authcService.get());
-        securityIndex.get().addIndexStateListener(authcService.get()::onSecurityIndexStateChange);
+        securityIndex.get().addStateListener(authcService.get()::onSecurityIndexStateChange);
 
         Set<RequestInterceptor> requestInterceptors = Sets.newHashSet(
             new ResizeRequestInterceptor(threadPool, getLicenseState(), auditTrailService),
@@ -1119,12 +1120,13 @@ public class Security extends Plugin implements SystemIndexPlugin, IngestPlugin,
 
     @Override
     public UnaryOperator<RestHandler> getRestHandlerWrapper(ThreadContext threadContext) {
-        if (enabled == false) {
-            return null;
+        final boolean extractClientCertificate;
+        if (enabled && HTTP_SSL_ENABLED.get(settings)) {
+            final SSLConfiguration httpSSLConfig = getSslService().getHttpTransportSSLConfiguration();
+            extractClientCertificate = getSslService().isSSLClientAuthEnabled(httpSSLConfig);
+        } else {
+            extractClientCertificate = false;
         }
-        final boolean ssl = HTTP_SSL_ENABLED.get(settings);
-        final SSLConfiguration httpSSLConfig = getSslService().getHttpTransportSSLConfiguration();
-        boolean extractClientCertificate = ssl && getSslService().isSSLClientAuthEnabled(httpSSLConfig);
         return handler -> new SecurityRestFilter(getLicenseState(), threadContext, authcService.get(), secondayAuthc.get(),
             handler, extractClientCertificate);
     }
@@ -1252,6 +1254,7 @@ public class Security extends Plugin implements SystemIndexPlugin, IngestPlugin,
              .setIndexFormat(INTERNAL_MAIN_INDEX_FORMAT)
              .setVersionMetaKey("security-version")
              .setOrigin(SECURITY_ORIGIN)
+             .setThreadPools(ExecutorNames.CRITICAL_SYSTEM_INDEX_THREAD_POOLS)
              .build();
      }
 
@@ -1266,6 +1269,7 @@ public class Security extends Plugin implements SystemIndexPlugin, IngestPlugin,
              .setIndexFormat(INTERNAL_TOKENS_INDEX_FORMAT)
              .setVersionMetaKey(SECURITY_VERSION_STRING)
              .setOrigin(SECURITY_ORIGIN)
+             .setThreadPools(ExecutorNames.CRITICAL_SYSTEM_INDEX_THREAD_POOLS)
              .build();
      }
 
