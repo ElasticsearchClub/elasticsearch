@@ -605,7 +605,7 @@ class BuildPlugin implements Plugin<Project> {
             name "elastic"
             url "https://artifacts-no-kpi.elastic.co/maven"
         }
-        repos.jcenter()
+        repos.mavenCentral()
         String luceneVersion = VersionProperties.lucene
         if (luceneVersion.contains('-snapshot')) {
             // extract the revision number from the version with a regex matcher
@@ -962,7 +962,15 @@ class BuildPlugin implements Plugin<Project> {
             heapdumpDir.mkdirs()
             jvmArg '-XX:HeapDumpPath=' + heapdumpDir
             if (project.runtimeJavaVersion >= JavaVersion.VERSION_1_9) {
-                jvmArg '--illegal-access=warn'
+                jvmArg '--illegal-access=deny'
+                jvmArg '--add-opens=java.base/java.security.cert=ALL-UNNAMED'
+                jvmArg '--add-opens=java.base/java.nio.channels=ALL-UNNAMED'
+                jvmArg '--add-opens=java.base/java.net=ALL-UNNAMED'
+                jvmArg '--add-opens=java.base/javax.net.ssl=ALL-UNNAMED'
+                jvmArg '--add-opens=java.base/java.nio.file=ALL-UNNAMED'
+                jvmArg '--add-opens=java.base/java.time=ALL-UNNAMED'
+                jvmArg '--add-opens=java.base/java.lang=ALL-UNNAMED'
+                jvmArg '--add-opens=java.management/java.lang.management=ALL-UNNAMED'
             }
             argLine System.getProperty('tests.jvm.argline')
 
